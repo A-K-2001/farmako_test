@@ -3,6 +3,17 @@ import { MongoClient, ObjectId } from 'mongodb';
 import dotenv, { parse } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { PrismaClient } from '@prisma/client';
+import pkg from 'pg';
+const { Client } = pkg;
+
+const client = new Client({
+    host: 'localhost',
+    port: 5432,
+    database: 'postgres',
+    user: 'postgres',
+    password: 'root',
+})
+client.connect()
 
 dotenv.config();
 
@@ -53,12 +64,13 @@ const userSchema = {
     },
 };
 
-app.get('/user', { preHandler: verifyToken, schema: userSchema }, async (req, res) => {
+app.get('/user', { preHandler: verifyToken , schema: userSchema }, async (req, res) => {
     try {
-        const users = await prismadb.user.findMany();
-        // console.log(users);
-        res.code(200).send(users);
+        const users = await client.query('SELECT * FROM "user"');
+        console.log(users.rows);
+        res.code(200).send(users.rows);
     } catch (error) {
+        console.log(error);
         res.code(500).send({ error: 'data not found' });
     }
 });
@@ -70,13 +82,9 @@ app.get('/user/:id', { preHandler: verifyToken }, async (req, res) => {
             res.code(400).send({ error: 'not valid id' });
             return
         }
-        const user = await prismadb.user.findUnique({
-            where: {
-                id: userId,
-            },
-        });
-        if (user) {
-            res.code(200).send(user);
+        const user = await client.query('SELECT * FROM "user" WHERE _id = $1', [userId]);
+        if (user.rows.length > 0) {
+            res.code(200).send(user.rows[0]);
         } else {
             res.code(404).send({ error: 'not found' });
         }
@@ -86,19 +94,19 @@ app.get('/user/:id', { preHandler: verifyToken }, async (req, res) => {
     }
 });
 
-app.post('/user', { preHandler: verifyToken }, async (req, res) => {
+app.post('/user', { preHandler: verifyToken },async (req, res) => {
     const user = req.body;
-    if (user.email && user.username) {
+    if (user.email && user.username && user._id) {
         try {
-            const result = await prismadb.user.create({
-                data: {
-                    username: user.username,
-                    email: user.email,
-                    role: user.role,
-                },
-            });
+            const result = await client.query(`
+                INSERT INTO "user" ("_id","username", "email", "role")
+                VALUES ($1, $2, $3,$4)
+                RETURNING *`,
+                [user._id, user.username, user.email, user.role]
+            );
             res.code(200).send(result);
         } catch (error) {
+            console.log(error);
             res.code(500).send({ err: 'error in saving document' });
         }
     } else {
@@ -109,17 +117,17 @@ app.post('/user', { preHandler: verifyToken }, async (req, res) => {
 app.delete('/user/:id', { preHandler: verifyToken }, async (req, res) => {
     try {
         const userId = parseInt(req.params.id);
-
         if (isNaN(userId)) {
             res.code(400).send({ error: 'Invalid user id' });
             return;
         }
 
-        const result = await prismadb.user.delete({
-            where: { id: userId },
-        });
-
-        res.code(200).send(result);
+        const result = await client.query('DELETE FROM "user" WHERE _id = $1 RETURNING *', [userId]);
+        if (result.rows.length > 0) {
+            res.code(200).send(result.rows[0]);
+        } else {
+            res.code(404).send({ error: 'User not found' });
+        }
     } catch (error) {
         console.error(error);
         res.code(500).send({ error: 'User not deleted' });
@@ -129,22 +137,25 @@ app.delete('/user/:id', { preHandler: verifyToken }, async (req, res) => {
 app.patch('/user/:id', { preHandler: verifyToken }, async (req, res) => {
     const userId = parseInt(req.params.id);
     const newUser = req.body;
-  
+
     if (isNaN(userId)) {
-      res.code(400).send({ error: 'Invalid user id' });
-      return;
+        res.code(400).send({ error: 'Invalid user id' });
+        return;
     }
-  
+
     try {
-      const updatedUser = await prismadb.user.update({
-        where: { id: userId },
-        data: newUser,
-      });
-  
-      res.code(200).send(updatedUser);
+        const updatedUser = await client.query(
+            'UPDATE "user" SET username = $1, email = $2, role = $3 WHERE _id = $4 RETURNING *',
+            [newUser.username, newUser.email, newUser.role, userId]
+        );
+        if (updatedUser.rows.length > 0) {
+            res.code(200).send(updatedUser.rows[0]);
+        } else {
+            res.code(404).send({ error: 'User not found' });
+        }
     } catch (error) {
-      console.error(error);
-      res.code(500).send({ error: 'User not updated' });
+        console.error(error);
+        res.code(500).send({ error: 'User not updated' });
     }
 });
 
@@ -152,19 +163,16 @@ app.post('/login', async (req, res) => {
     const user = req.body;
     if (user.username) {
         try {
-            const result = await prismadb.user.findUnique({
-                where: {
-                    username: user.username,
-                },
-            });
+            const result = await client.query('SELECT * FROM "user" WHERE username = $1', [user.username]);
             console.log(result);
-            if(!result) {
-                res.code(404).send({ err: 'user not found' });
-                return;
+            if (result.rows.length > 0) {
+                const userFromDb = result.rows[0];
+                jwt.sign({ username: userFromDb.username, role: userFromDb.role }, process.env.JWT_SCRT, { expiresIn: 3000 }, (err, token) => {
+                    res.code(201).send({ token });
+                });
+            } else {
+                res.code(404).send({ err: 'User not found' });
             }
-            jwt.sign({ username: result.username, role: result.role }, process.env.JWT_SCRT, { expiresIn: 3000 }, (err, token) => {
-                res.code(201).send({ token });
-            });
         } catch (error) {
             console.log(error);
             res.code(500).send({ err: 'error in login' });
